@@ -13,13 +13,14 @@ import sys
 from pytictoc import TicToc
 from joblib import Parallel, delayed
 import multiprocessing
+from multiprocessing import Queue, Pool
 
 dim=(300,300)
 EXAMPLES_BASE_DIR='/home/pi/rpi-ncs-toolkit/data/'
 VIDEO_FULL_PATH = EXAMPLES_BASE_DIR + 'sample_video.mp4' 
 IMAGE_FULL_PATH = EXAMPLES_BASE_DIR + 'sample_image_2.jpg'
 
-__MODE__ = 'IMG' # 'VID' or 'IMG'
+__MODE__ = 'VID' # 'VID' or 'IMG'
 __VERBOSE__ = False
 
 # ***************************************************************
@@ -174,6 +175,13 @@ def preprocess_image(src):
     #img = img.transpose((2,0,1))
     return img
 
+def worker(graph, input_q, output_q):
+    while True:
+        frame = input_q.get()
+        graph.LoadTensor(frame.astype(numpy.uint8),None)
+        out, userobj = graph.GetResult()
+        # do some post processing
+        output_q.put((frame, out))	
 
 # This function is called from the entry point to do
 # all the work of the program
@@ -195,7 +203,7 @@ def main():
     device.OpenDevice()
 
     # The graph file that was created with the ncsdk compiler
-    graph_file_name = 'detect.graph'
+    graph_file_name = 'zbox.graph'
 
     # read in the graph file to memory buffer
     with open(graph_file_name, mode='rb') as f:
@@ -203,20 +211,36 @@ def main():
 
     # create the NCAPI graph instance from the memory buffer containing the graph file.
     graph = device.AllocateGraph(graph_in_memory)
+    graph.SetGraphOption(mvnc.GraphOption.ITERATIONS,1)
 
+    input_q = Queue(maxsize=32)
+    output_q = Queue(maxsize=32)
+    pool = Pool(8, worker, (graph, input_q, output_q))
+
+    t = TicToc()
     if __MODE__ == 'VID':
     	vid = cv2.VideoCapture(VIDEO_FULL_PATH)
 	while ( vid.isOpened() ):
+		#t.tic()
 		ret, frame = vid.read()
+		#t.toc()
 	        # read the image to run an inference on from the disk
-	        infer_image = cv2.resize(frame,(512,512))
-	
+	        #infer_image = cv2.resize(frame,(512,512))
+		infer_image = cv2.resize(frame,(416,416))/255.
+		#input_q.put(infer_image)
+		#(frame, out) = output_q.get()
+
 	        # run a single inference on the image and overwrite the
 	        # boxes and labels
-	        run_inference(infer_image, graph)
-	        
+	        #run_inference(infer_image, graph)
+	        graph.LoadTensor(infer_image.astype(numpy.int8), None)
+    		t = TicToc()
+    		t.tic()
+    		output, userobj = graph.GetResult()
+    		t.toc()
+
 	        # display the results and wait for user to hit a key
-	        cv2.imshow(cv_window_name, infer_image)
+	        cv2.imshow(cv_window_name, frame)
 	        cv2.waitKey(1)
     elif __MODE__ == 'IMG':
 	infer_image = cv2.imread(IMAGE_FULL_PATH)
