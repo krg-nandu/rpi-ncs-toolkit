@@ -226,18 +226,18 @@ def main():
 		#t.toc()
 	        # read the image to run an inference on from the disk
 	        #infer_image = cv2.resize(frame,(512,512))
-		infer_image = cv2.resize(frame,(416,416))/255.
+		infer_image = cv2.resize(frame,(416,416))/255. - 0.5
 		#input_q.put(infer_image)
 		#(frame, out) = output_q.get()
 
 	        # run a single inference on the image and overwrite the
 	        # boxes and labels
 	        #run_inference(infer_image, graph)
-	        graph.LoadTensor(infer_image.astype(numpy.int8), None)
-    		t = TicToc()
-    		t.tic()
+	        graph.LoadTensor(infer_image.astype(numpy.float16), None)
+    		#t = TicToc()
+    		#t.tic()
     		output, userobj = graph.GetResult()
-    		t.toc()
+    		#t.toc()
 
 	        # display the results and wait for user to hit a key
 	        cv2.imshow(cv_window_name, frame)

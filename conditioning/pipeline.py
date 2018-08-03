@@ -10,15 +10,19 @@ from threading import Thread
 from pytictoc import TicToc
 
 import multiprocessing
-from multiprocessing import Queue, Pool
+#from multiprocessing import Queue, Pool
+from Queue import Queue
 
 from mvnc import mvncapi as mvnc
 
 from psychopy import visual, core, event
+import profile
+
+import matplotlib.pyplot as plt
 
 w=1920
 h=1080
-rate=30
+rate=20
 fw=(w+31)//32*32
 fh=(h+15)//16*16
 Y=None
@@ -36,36 +40,63 @@ stream_done=False
 cv2.namedWindow("detection", cv2.WINDOW_AUTOSIZE)
 dim=(416,416)
 output_dim=(13,13,3)
-imdims=(416,416,3)
+imdims=(416,416)
+
 
 # The graph file that was created with the ncsdk compiler
 graph_file_name='zbox_v3.graph'
 
-def display_worker(display_q):
+save_q = Queue(maxsize=0)
+process_q = Queue(maxsize=0)
+result_q = Queue(maxsize=0)
+
+"""
+fig = plt.figure(0)
+ax = fig.add_subplot(111)
+ax.set_xlim([0,w])
+ax.set_ylim([0,h])
+ax.axis('off')
+"""
+
+def display_worker(result_q):
     mywin=visual.Window([640,480],units="pix",fullscr=False,color="white")
     white=visual.ImageStim(win=mywin,image="white.png",size=(640,480),pos=[0,0])
     plate=visual.Circle(mywin,20,lineColor="Black")
     shape=visual.Circle(mywin,5,fillColor='Red')
-    while (not stream_done):
-	(v1,v2) = display_q.get()
-	#print(v1,v2)
-	shape.setPos([v1,v2])
+
+    white.draw()
+    plate.draw()
+    mywin.flip()
+
+    while not stream_done:
+	(v1,v2) = result_q.get()
+	#shape.setPos([v1,v2])
 	white.draw()
 	plate.draw()
 	shape.draw()
 	mywin.flip()
-    
-    mywin.close()
-    core.quit()
+ 	result_q.task_done()
 
-def inference_worker(graph, input_q, display_q):
-    #global stream_done
+    mywin.close()
+
+"""
+def display_worker(result_q):
+    (v1,v2) = result_q.get()
+    #cv2.imshow("win",plate)
+    #cv2.waitKey(1)
+    ax.cla()
+    ax.scatter(v1,v2)
+    plt.pause(0.0001)
+    result_q.task_done()
+"""
+
+def process_worker(graph, process_q, result_q):
     Xsmall = numpy.ndarray(shape=imdims,dtype=numpy.float16)
     Xsmall_int = numpy.ndarray(shape=imdims,dtype=numpy.uint8)
-    Xbig = numpy.ndarray(shape=(w,h,3),dtype=numpy.float16)
+    Xbig = numpy.ndarray(shape=(w,h),dtype=numpy.float16)
 
-    while (not stream_done): #or (not input_q.empty()):
-        frame = input_q.get()
+    while True:
+        frame = process_q.get()
 
 	cv2.resize(src=frame, dsize=dim, dst=Xsmall_int, interpolation=cv2.INTER_NEAREST)
 	Xsmall[:] = Xsmall_int[:]
@@ -82,40 +113,25 @@ def inference_worker(graph, input_q, display_q):
         val = spatial_grid[idx[0],idx[1],:]
         v1 = (idx[0]*32 + val[0]*32) * (w / 416.)
         v2 = (idx[1]*32 + val[1]*32) * (h / 416.)
-	#print(v1,v2)
-	display_q.put_nowait((v1,v2))
+	print(v1,v2)
+	result_q.put_nowait((v1,v2))
+	process_q.task_done()
+
 
 def saver_worker(save_q):
-    #global stream_done
-    while (not stream_done) or (not save_q.empty()):
+    while True:
 	(X, id) = save_q.get()
-	#output_video.write(X)
  	cv2.imwrite("video/img"+str(id)+".png",X)
+	save_q.task_done()
 
 def outputs():
     global Y
-    global U
-    global V
-    global YUV
     stream = io.BytesIO()
-    #t = TicToc()
     while not stream_done:
-
         yield stream
-
         stream.seek(0)
-
         Y=numpy.fromstring(stream.getvalue(),dtype=numpy.uint8,count=fw*fh).\
            reshape((fh,fw))
-	U=numpy.fromstring(stream.getvalue(),dtype=numpy.uint8,count=(fw//2)*(fh//2)).\
-	   reshape((fh//2,fw//2)).\
- 	   repeat(2,axis=0).repeat(2,axis=1)
-	V=numpy.fromstring(stream.getvalue(),dtype=numpy.uint8,count=(fw//2)*(fh//2)).\
-           reshape((fh//2,fw//2)).\
-           repeat(2,axis=0).repeat(2,axis=1)
-	YUV=numpy.dstack((Y,U,V))[:h,:w,:]
-	YUV[:,:,0] = YUV[:,:,0] - 16
-	YUV[:,:,1:] = YUV[:,:,1:] - 128
         stream.seek(0)
         stream.truncate()
 
@@ -128,10 +144,11 @@ def startcapt():
     t.daemon = True
     t.start()
 
+
 # This function is called from the entry point to do
 # all the work of the program
 def main():
-    global stream_done
+    
     # Get a list of ALL the sticks that are plugged in
     # we need at least one
     devices = mvnc.EnumerateDevices()
@@ -152,92 +169,73 @@ def main():
     # create the NCAPI graph instance from the memory buffer containing the graph file.
     graph = device.AllocateGraph(graph_in_memory)
     graph.SetGraphOption(mvnc.GraphOption.ITERATIONS,1)
-    #graph.SetGraphOption(mvnc.GraphOption.DONT_BLOCK,1)
 
-    process_q = Queue()
-    display_q = Queue()
-    #infer_thread = multiprocessing.Process(target=inference_worker,args=(graph,process_q))
-    infer_thread = Thread(target=inference_worker,args=(graph,process_q,display_q))
+    plate = cv2.imread("white.png")
+    cur_im = plate.copy()
 
-    save_q = Queue()
-    #save_thread = multiprocessing.Process(target=saver_worker,args=(save_q,))
-    save_thread = Thread(target=saver_worker,args=(save_q,))
+    #display_thread = Thread(target=display_worker,args=(result_q,))
+    #display_thread.setDaemon(True)
+    #display_thread.start()
+    mywin=visual.Window([640,480],units="pix",fullscr=False,color="white")
+    white=visual.ImageStim(win=mywin,image="white.png",size=(640,480),pos=[0,0])
+    plate=visual.Circle(mywin,20,lineColor="Black")
+    shape=visual.Circle(mywin,5,fillColor='Red')
 
-    #stim_thread = multiprocessing.Process(target=display_worker,args=(display_q,))
-    #stim_thread = Thread(target=display_worker,args=(display_q,))
-
-    # start the inference workers
-    infer_thread.start()
-    # start the saver workers
-    save_thread.start()
-    # start the stimulus display part
-    #stim_thread.start()
     # start the capture threads
     startcapt()
 
-    mywin=visual.Window([640,480],units="pix",fullscr=True,color="white")
-    white=visual.ImageStim(win=mywin,image="white.png",size=(640,480),pos=[0,0])
-    shape=visual.Circle(mywin,5,fillColor='Red')
-    plate=visual.Circle(mywin,110,lineColor="Black")
-
-
-    white.draw()
-    plate.draw()
-    mywin.flip()
-
     # to avoid the initial burst of exposure
-    time.sleep(10)
+    time.sleep(2)
 
-    frame_counter = 1
-    t=TicToc()
+    # pool of threads for saving to disk
+    for i in range(16):
+        save_thread = Thread(target=saver_worker,args=(save_q,))
+        save_thread.setDaemon(True)
+        save_thread.start()
+
+    for i in range(16):
+        process_thread = Thread(target=process_worker,args=(graph,process_q,result_q))
+        process_thread.setDaemon(True)
+        process_thread.start()
+
+    t = TicToc()
     t.tic()
-
+    frame_counter = 1
     while True:
-	print(frame_counter)
         if frame_counter%(5*rate) == 0:
 	    break
-
-        save_q.put_nowait((YUV,frame_counter))
-	frame_counter += 1
-	if frame_counter%5 == 0:
-	    process_q.put_nowait(YUV)
+	save_q.put_nowait((Y,frame_counter))
 	
-	if not display_q.empty():
-	    (v1,v2) = display_q.get()
-	    shape.pos = (v2,v1)
-	    white.draw()
-	    plate.draw()
-	    shape.draw()
-	    mywin.flip()
+	if frame_counter%3 == 0:
+	    process_q.put_nowait(Y)
+
+	white.draw()
+    	plate.draw()
+	if result_q.qsize() > 0:
+	    try:
+            	(v1,v2) = result_q.get(timeout=5)
+	    	shape.draw()
+	    	result_q.task_done()
+	    except Queue.Full:
+		break
+    	mywin.flip()
 
 	# this is to ensure frame rate compatibility
-        time.sleep(1./rate)
-
+	time.sleep(1./rate)
+		
+	# update frame index
+	frame_counter += 1
     t.toc()
-
     stream_done=True
-    cv2.destroyAllWindows()
 
-    # make sure no more entries are added to the queue
-    process_q.close()
-    save_q.close()
-    
-    # wait for threads to complete
-    infer_thread.join()
-
-    display_q.close()
-    #stim_thread.join()
-
-    save_thread.join()
-
-    # Clean up the graph and the device
-    graph.DeallocateGraph()
-    device.CloseDevice()
+    #cv2.destroyAllWindows()
     #output_video.release()
 
-    #mywin.close()
-    #core.quit()
+    process_q.join()
+    #result_q.join()
+    save_q.join()
 
 # main entry point for program. we'll call main() to do what needs to be done.
 if __name__ == "__main__":
+    #profile.run('main()')
     sys.exit(main())

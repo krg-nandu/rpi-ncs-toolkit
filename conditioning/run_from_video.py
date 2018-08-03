@@ -125,7 +125,7 @@ def main():
     #pool1 = Pool(4, saver_worker, (save_q))
 
     # start the capture threads
-    startcapt()
+    #startcapt()
     
     # to avoid the initial burst of exposure
     time.sleep(0.5)
